@@ -60,6 +60,7 @@ pub mod identity;
 // Networking
 pub use address::MultiAddr;
 pub use network::{NodeConfig, NodeMode, P2PEvent, P2PNode};
+pub use transport_handle::TrafficSnapshot;
 
 // DHT types — peer discovery, routing, and network events
 pub use dht::Key;

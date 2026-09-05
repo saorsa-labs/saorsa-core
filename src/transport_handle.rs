@@ -254,6 +254,71 @@ pub(crate) struct TrafficCounters {
     pub identity_announce_tx_count: AtomicU64,
 }
 
+impl TrafficCounters {
+    /// Load every counter (relaxed) into a plain-value [`TrafficSnapshot`].
+    pub(crate) fn snapshot(&self) -> TrafficSnapshot {
+        TrafficSnapshot {
+            wire_tx_bytes: self.wire_tx_bytes.load(Ordering::Relaxed),
+            wire_tx_count: self.wire_tx_count.load(Ordering::Relaxed),
+            overhead_tx_bytes: self.overhead_tx_bytes.load(Ordering::Relaxed),
+            wire_rx_bytes: self.wire_rx_bytes.load(Ordering::Relaxed),
+            wire_rx_count: self.wire_rx_count.load(Ordering::Relaxed),
+            overhead_rx_bytes: self.overhead_rx_bytes.load(Ordering::Relaxed),
+            find_node_tx_count: self.find_node_tx_count.load(Ordering::Relaxed),
+            nodes_found_tx_bytes: self.nodes_found_tx_bytes.load(Ordering::Relaxed),
+            nodes_found_tx_count: self.nodes_found_tx_count.load(Ordering::Relaxed),
+            publish_addr_tx_count: self.publish_addr_tx_count.load(Ordering::Relaxed),
+            ping_tx_count: self.ping_tx_count.load(Ordering::Relaxed),
+            identity_announce_tx_bytes: self.identity_announce_tx_bytes.load(Ordering::Relaxed),
+            identity_announce_tx_count: self.identity_announce_tx_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Point-in-time copy of the cumulative wire-traffic counters (V2-623).
+///
+/// Returned by `TransportHandle::traffic_snapshot`. All values are monotonic
+/// since process start (relaxed atomic loads of the internal counters); compute
+/// rates as deltas between two snapshots. `wire_rx_bytes` counts decoded
+/// protocol bytes — malformed / signature-rejected frames are excluded, so it
+/// is not raw host ingress. `overhead_*` = wire − payload (per-message
+/// envelope cost: signature + ML-DSA-65 public key + framing).
+///
+/// This is the same counter set the periodic
+/// `wire traffic summary (cumulative)` INFO line emits, exposed as an API so
+/// embedders (bandwidth meters, data-usage screens) can read it on their own
+/// schedule instead of scraping tracing output.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TrafficSnapshot {
+    /// Total wire bytes sent (signed+serialised `WireMessage`s).
+    pub wire_tx_bytes: u64,
+    /// Total wire messages sent.
+    pub wire_tx_count: u64,
+    /// Envelope overhead sent = wire − payload.
+    pub overhead_tx_bytes: u64,
+    /// Wire bytes received and successfully decoded.
+    pub wire_rx_bytes: u64,
+    /// Wire messages received and successfully decoded.
+    pub wire_rx_count: u64,
+    /// Envelope overhead received = wire − payload (decoded messages only).
+    pub overhead_rx_bytes: u64,
+    /// FIND_NODE requests sent (counted only after a successful send).
+    pub find_node_tx_count: u64,
+    /// `NodesFound` response payload bytes encoded, not confirmed sends.
+    pub nodes_found_tx_bytes: u64,
+    /// `NodesFound` responses encoded.
+    pub nodes_found_tx_count: u64,
+    /// `PUBLISH_ADDRESS_SET` operations sent (counted only after a successful send).
+    pub publish_addr_tx_count: u64,
+    /// Ping operations sent (counted only after a successful send).
+    pub ping_tx_count: u64,
+    /// Identity-announce wire bytes sent (bypasses `send_on_channel`).
+    pub identity_announce_tx_bytes: u64,
+    /// Identity announces sent.
+    pub identity_announce_tx_count: u64,
+}
+
 /// Encapsulates transport-level concerns: QUIC connections, peer registry,
 /// message I/O, and network events.
 ///
@@ -2232,6 +2297,17 @@ impl TransportHandle {
         self.event_tx.subscribe()
     }
 
+    /// Snapshot the cumulative wire-traffic counters (V2-623).
+    ///
+    /// Cheap (13 relaxed atomic loads, no locks); safe to call on any
+    /// cadence. See [`TrafficSnapshot`] for field semantics. Reachable from
+    /// embedding applications via
+    /// [`P2PNode::transport`](crate::network::P2PNode::transport) or
+    /// [`DhtNetworkManager::transport`](crate::dht_network_manager::DhtNetworkManager::transport).
+    pub fn traffic_snapshot(&self) -> TrafficSnapshot {
+        self.traffic.snapshot()
+    }
+
     /// Send an event to all subscribers.
     pub(crate) fn send_event(&self, event: P2PEvent) {
         if let Err(e) = self.event_tx.send(event) {
@@ -2976,6 +3052,40 @@ mod address_event_observer_tests {
             Some(second)
         );
         assert_eq!(TransportHandle::drain_latest_socket_event(&rx), None);
+    }
+}
+
+#[cfg(test)]
+mod traffic_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn default_counters_snapshot_to_zero() {
+        assert_eq!(
+            TrafficCounters::default().snapshot(),
+            TrafficSnapshot::default()
+        );
+    }
+
+    #[test]
+    fn snapshot_reflects_counter_values() {
+        let counters = TrafficCounters::default();
+        counters.wire_tx_bytes.fetch_add(1024, Ordering::Relaxed);
+        counters.wire_tx_count.fetch_add(3, Ordering::Relaxed);
+        counters.wire_rx_bytes.fetch_add(2048, Ordering::Relaxed);
+        counters.wire_rx_count.fetch_add(5, Ordering::Relaxed);
+        counters.overhead_tx_bytes.fetch_add(7, Ordering::Relaxed);
+        counters.ping_tx_count.fetch_add(2, Ordering::Relaxed);
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.wire_tx_bytes, 1024);
+        assert_eq!(snap.wire_tx_count, 3);
+        assert_eq!(snap.wire_rx_bytes, 2048);
+        assert_eq!(snap.wire_rx_count, 5);
+        assert_eq!(snap.overhead_tx_bytes, 7);
+        assert_eq!(snap.ping_tx_count, 2);
+        assert_eq!(snap.find_node_tx_count, 0);
+        assert_eq!(snap.identity_announce_tx_bytes, 0);
     }
 }
 
